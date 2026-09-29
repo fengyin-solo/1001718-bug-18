@@ -43,6 +43,8 @@
               :key="action"
               class="link"
               type="button"
+              :disabled="!isActionAllowed(action, row)"
+              :title="isActionAllowed(action, row) ? action : `当前「${row['设备状态']}」状态不能${action}`"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -71,8 +73,14 @@ type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/boiler'
 const columns = ["设备编号", "设备名称", "额定蒸发量", "工作压力", "使用场所", "投用日期", "下次检验日", "设备状态"]
-const actions = ["办理投用", "安排检修", "报废设备"]
-const statuses = ["待投用", "在用运行", "停炉检修", "已报废"]
+const actions = ["办理投用", "安排检修", "报废设备"] as const
+// 与后端状态机保持一致：只有当前状态允许的动作才可点击，非法流转直接置灰。
+const ACTIONS_BY_STATUS: Record<string, readonly string[]> = {
+  "待投用": ["办理投用"],
+  "在用运行": ["安排检修", "报废设备"],
+  "停炉检修": ["办理投用", "报废设备"],
+  "已报废": [],
+}
 const stats = [{"label": "在用锅炉", "value": 0}, {"label": "停炉检修", "value": 0}, {"label": "临近检验", "value": 0}]
 
 const rows = ref<Row[]>([])
@@ -81,13 +89,24 @@ const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 
+function activeQuery() {
+  return new URLSearchParams(filters.value as Record<string, string>).toString()
+}
+
+function isActionAllowed(action: string, row: Row) {
+  const allowed = ACTIONS_BY_STATUS[String(row['设备状态'] ?? '')] ?? []
+  return allowed.includes(action)
+}
+
 function resetFilters() {
   filters.value = {}
   void reload()
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  // 导出地址与列表共用同一套过滤参数，保证导出内容与列表对得上。
+  const query = activeQuery()
+  window.open(`${ENDPOINT}/export${query ? `?${query}` : ''}`, '_blank')
 }
 
 function openCreate() {
@@ -95,6 +114,10 @@ function openCreate() {
 }
 
 async function runAction(action: string, row: Row) {
+  if (!isActionAllowed(action, row)) {
+    errorMessage.value = `锅炉设备当前为「${row['设备状态']}」，不能${action}`
+    return
+  }
   errorMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
@@ -104,6 +127,11 @@ async function runAction(action: string, row: Row) {
     if (!response.ok) {
       throw new Error('锅炉设备动作未生效，请稍后重试')
     }
+    const payload = await response.json()
+    // HTTP 200 也可能是业务拦截（ok=false），需要把后端说明展示出来并保持列表不被改乱。
+    if (!payload.ok) {
+      throw new Error(payload.message || '锅炉设备动作未生效')
+    }
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '锅炉设备操作失败'
@@ -112,9 +140,9 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = activeQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${query ? `?${query}` : ''}`)
     if (!response.ok) {
       throw new Error('锅炉设备列表读取失败')
     }

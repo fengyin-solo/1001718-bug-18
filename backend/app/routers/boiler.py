@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from app.schemas import ActionResult, EntryPayload, PageResult
 from app.services.boiler import BoilerService
@@ -16,18 +17,43 @@ LIST_FIELDS = ["设备编号", "设备名称", "额定蒸发量", "工作压力"
 STATUSES = ["待投用", "在用运行", "停炉检修", "已报废"]
 
 
+class ActionPayload(BaseModel):
+    """行内动作报文：前端直接提交动作名 {"action": "办理投用"}。"""
+
+    action: str = ""
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按设备编号检索"),
+    keyword: str | None = Query(default=None, description="按设备编号检索（兼容旧参数）"),
     status: str | None = Query(default=None, description="待投用、在用运行、停炉检修、已报废"),
     page: int = 1,
     size: int = 20,
+    设备编号: str | None = None,
+    设备名称: str | None = None,
+    额定蒸发量: str | None = None,
 ) -> PageResult[dict]:
-    """按设备编号与状态过滤锅炉设备列表；没有数据时返回空页，不报错。"""
+    """按展示列与状态过滤锅炉设备列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    filters = {"设备编号": 设备编号 or keyword or "", "设备名称": 设备名称 or "", "额定蒸发量": 额定蒸发量 or ""}
+    items, total = service.list_entries(filters=filters, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+# 注意：/export 必须在 /{entry_id} 之前注册，否则会被当成设备 id 解析而报 422。
+@router.get("/export")
+def export_entries(
+    keyword: str | None = None,
+    status: str | None = None,
+    设备编号: str | None = None,
+    设备名称: str | None = None,
+    额定蒸发量: str | None = None,
+) -> dict[str, Any]:
+    """导出锅炉设备清单：口径与列表一致，返回当前过滤条件下的全量数据。"""
+    filters = {"设备编号": 设备编号 or keyword or "", "设备名称": 设备名称 or "", "额定蒸发量": 额定蒸发量 or ""}
+    items, total = service.list_entries(filters=filters, status=status, page=1, size=10000)
+    return {"module": "boiler", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -37,6 +63,15 @@ def get_entry(entry_id: int) -> dict:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"锅炉设备 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.get("/{entry_id}/history")
+def get_history(entry_id: int) -> dict[str, Any]:
+    """读取单条锅炉设备的操作记录；记录只追加，不提供修改入口。"""
+    history = service.get_history(entry_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail=f"锅炉设备 {entry_id} 不存在或已归档")
+    return {"module": "boiler", "entry_id": entry_id, "total": len(history), "items": history}
 
 
 @router.post("", response_model=ActionResult)
@@ -49,17 +84,7 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条锅炉设备执行办理投用、安排检修、报废设备；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
-    if entry is None:
-        return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出锅炉设备清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "boiler", "total": total, "items": items}
+def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
+    """对单条锅炉设备执行办理投用、安排检修、报废设备；非法动作或当前状态不允许的流转会被拦下。"""
+    entry, message, ok = service.run_action(entry_id, payload.action)
+    return ActionResult(ok=ok, message=message, entry=entry)
