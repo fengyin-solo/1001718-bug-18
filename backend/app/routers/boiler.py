@@ -30,6 +30,16 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按设备编号检索"),
+    status: str | None = Query(default=None, description="待投用、在用运行、停炉检修、已报废"),
+) -> dict[str, Any]:
+    """导出锅炉设备清单：口径与列表一致，返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(keyword=keyword, status=status, page=1, size=10000)
+    return {"module": "boiler", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条锅炉设备明细；不存在时给出可读的错误说明。"""
@@ -37,6 +47,15 @@ def get_entry(entry_id: int) -> dict:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"锅炉设备 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.get("/{entry_id}/records")
+def list_entry_records(entry_id: int) -> dict[str, Any]:
+    """读取单条锅炉设备的流转记录（动作留痕）；设备不存在时给出可读错误。"""
+    records = service.list_records(entry_id)
+    if records is None:
+        raise HTTPException(status_code=404, detail=f"锅炉设备 {entry_id} 不存在或已归档")
+    return {"module": "boiler", "id": entry_id, "items": records}
 
 
 @router.post("", response_model=ActionResult)
@@ -50,16 +69,10 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条锅炉设备执行办理投用、安排检修、报废设备；不允许的动作会被拦下并说明原因。"""
+    """对单条锅炉设备执行办理投用、安排检修、恢复投用、报废设备；
+    动作参数统一放在 values 里，不允许的动作会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出锅炉设备清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "boiler", "total": total, "items": items}

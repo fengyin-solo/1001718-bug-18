@@ -653,3 +653,43 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '付款日期': '2026-09-03',
   '结算状态': '费用结算样例3'}]
 }
+
+
+def _backfill_boiler_records() -> None:
+    """锅炉设备存量数据按采集顺序回填流转记录。
+
+    采集顺序即 id 升序：每条设备先有一条「登记入库」，再按当前所处状态
+    补录对应的「办理投用」「安排检修」记录，保证存量记录连贯、不被改乱。
+    """
+    for row in SEED_ROWS["boiler"]:
+        collect_date = str(row.get("投用日期") or "")
+        records: list[dict[str, Any]] = [
+            {
+                "action": "登记入库",
+                "from_status": None,
+                "to_status": "待投用",
+                "time": collect_date,
+                "note": "存量设备按采集顺序回填",
+            }
+        ]
+        status = row.get("status")
+        if status in ("在用运行", "停炉检修"):
+            records.append({
+                "action": "办理投用",
+                "from_status": "待投用",
+                "to_status": "在用运行",
+                "time": collect_date,
+                "note": "存量设备按采集顺序回填",
+            })
+        if status == "停炉检修":
+            records.append({
+                "action": "安排检修",
+                "from_status": "在用运行",
+                "to_status": "停炉检修",
+                "time": collect_date,
+                "note": "存量设备按采集顺序回填",
+            })
+        row["records"] = records
+
+
+_backfill_boiler_records()
